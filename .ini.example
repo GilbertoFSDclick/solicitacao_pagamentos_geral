@@ -1,0 +1,65 @@
+# ============================================================
+# EXEMPLO DE CONFIGURACAO - Lancamento de Solicitacoes de Pagamento Geral
+# Copie para .ini e preencha os valores. O .ini NAO e commitado (gitignore).
+# ============================================================
+
+[email.enviar]
+user = seu_email@empresa.com.br
+password = sua_senha
+host = smtp-mail.outlook.com
+
+[email.destinatarios]
+sucesso = email1@empresa.com, email2@empresa.com
+erro = email1@empresa.com, email2@empresa.com
+# Obrigatório para TE07 (Tipo Pagamento não parametrizado): notificação à área Fiscal
+fiscal = email_fiscal@empresa.com
+
+[bot]
+nome = Lancamento de Solicitacoes de Pagamento Geral - NBS
+
+[holmes]
+host = https://app-api.holmesdoc.io
+id_fluxo = ID_DO_FLUXO_HOLMES
+token = TOKEN_API_HOLMES
+nome_acao_tarefa_sucesso = Finalizar
+nome_acao_tarefa_erro = Pendenciar
+nome_processo = Tarefas - Solicitacao de Pagamentos Geral
+id_usuario = ID_USUARIO_RPA_NO_HOLMES
+id_pendencia_tarefa = ID_CAMPO_PENDENCIA
+acao_sucesso = ID_ACAO_SUCESSO
+acao_erro = ID_ACAO_ERRO
+nome_atividade = Departamento de Multas
+
+[webhook]
+base_url = https://api-rpa.automob.com.br:2087
+token = TOKEN_WEBHOOK
+max_tentativas = 3
+
+[nbs]
+caminho_sistema = C:\NBS\SisFin.exe
+titulo_sistema = NBS Sistema Financeiro
+planilha_empresas = \\servidor\rpa\Empresas_NBS.xlsx
+planilha_tipos_pagamento = \\servidor\rpa\TIPOS_DE_PAGAMENTO.xlsx
+diretorio_planilha = \\servidor\rpa
+# Data de Corte (DD/MM/YYYY): valida vencimento. Se data_corte_bloquear=true, pendenciar quando vencimento > corte
+data_corte =
+data_corte_bloquear = false
+# true = parar após Total Nota e Observações (para testes parciais do fluxo)
+parar_apos_observacoes = true
+processos = NBSShortCut, SisFin
+usuario = USUARIO_NBS
+senha = SENHA_NBS
+servidor = uab
+
+[banco_controle]
+# Fluxo Prévio II: inserir dados Holmes + Codigo_UAB_Contabil no banco de controle
+# habilitado = true para insert real; false apenas loga
+habilitado = false
+# url = conexão SQLAlchemy (ex: sqlite:///controle_rpa.db ou mssql+pyodbc://...)
+url =
+# tabela = nome da tabela (padrão: rpa_controle_solicitacao_pagamento)
+tabela = rpa_controle_solicitacao_pagamento
+
+[logger]
+flag_persistencia = True
+dias_persistencia = 14

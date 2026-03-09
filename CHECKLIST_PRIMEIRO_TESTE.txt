@@ -1,0 +1,34 @@
+CHECKLIST - Primeiro teste na VPN / máquina do cliente
+=====================================================
+
+Antes de rodar
+--------------
+[ ] VPN conectada
+[ ] NBS instalado (caminho igual ao do .ini)
+[ ] .ini com usuario, senha e servidor NBS preenchidos
+[ ] planilha_tipos_pagamento acessível (caminho do .ini)
+[ ] planilha_empresas acessível (se usada)
+[ ] parar_apos_observacoes = true (para primeiro teste só até Observações)
+
+Execução
+--------
+[ ] Terminal na pasta do projeto
+[ ] Ambiente ativado: .\venv\Scripts\Activate.ps1
+[ ] Comando: python main.py
+
+Durante o teste
+---------------
+[ ] NBS abriu e fez login?
+[ ] Apareceu tela Empresa/Filial (ou Empresa/Filial/Exercício Contábil)?
+[ ] Abriu "Incluir Entrada (Só Diversa)"?
+[ ] Preencheu CPF, Nº NF, Série, Emissão, Entrada?
+[ ] Desmarcou "Quero esta nota no livro fiscal"?
+[ ] Preencheu Total Nota e Observações?
+[ ] Se parou em algum passo: anotar em qual tela e qual campo falhou
+
+Depois do primeiro teste
+------------------------
+[ ] Se tudo ok até Observações: mudar parar_apos_observacoes = false
+[ ] Rodar de novo e testar Contabilização + Faturamento + Confirmar + Ficha Controle
+[ ] Verificar Holmes: tarefa encaminhada com sucesso
+[ ] Verificar e-mail de sucesso recebido

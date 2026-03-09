@@ -1,0 +1,26 @@
+# python cache
+**/__pycache__
+
+# log e configfile
+*.log
+/logs
+.ini
+
+# banco de dados (dados do cliente)
+*.db
+
+# ambiente virtual
+*venv
+
+# pyinstaller
+/build
+/dist
+**.spec
+
+# vscode cfg
+/.vscode
+
+# outros
+*.xml
+*.xlsx
+release.yaml
