@@ -62,8 +62,12 @@ def _inserir_registro(registro: dict) -> None:
         return
 
     try:
+        import re
         import sqlalchemy
         from sqlalchemy import text
+        if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_.]*$', tabela):
+            bot.logger.erro(f"[Banco Controle] Nome de tabela inválido: {tabela!r}")
+            raise ValueError(f"Nome de tabela inválido: {tabela!r}")
         engine = sqlalchemy.create_engine(url)
         cols = ", ".join(registro.keys())
         placeholders = ", ".join(f":{k}" for k in registro.keys())
