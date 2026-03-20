@@ -9,7 +9,7 @@ import re
 from dataclasses import dataclass
 import bot
 import modulos
-from src.exceptions import ErroNegocio, ErroTecnico
+from src.exceptions import ErroNegocio, ErroTecnico, CamposNBS
 from datetime import datetime
 
 
@@ -119,7 +119,62 @@ def _obter_codigos_empresa_filial(cnpj_loja: str | None, filial_nome: str | None
     return None, None
 
 
-def tratar_tarefa_aberta(identificador: str) -> tuple[list, dict]:
+def _normalizar_data_holmes(valor: str | None) -> str | None:
+    """Normaliza data para DD/MM/YYYY removendo qualquer parte de hora."""
+    if valor is None:
+        return None
+    s = str(valor).strip()
+    if not s:
+        return None
+
+    # ISO (ex.: 2026-03-17T09:28:13.000Z)
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00")).strftime("%d/%m/%Y")
+    except (ValueError, TypeError):
+        pass
+
+    formatos = (
+        "%d/%m/%Y",
+        "%d/%m/%Y %H:%M:%S",
+        "%d/%m/%Y %H:%M",
+        "%Y-%m-%d",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+    )
+    for fmt in formatos:
+        try:
+            return datetime.strptime(s, fmt).strftime("%d/%m/%Y")
+        except (ValueError, TypeError):
+            continue
+
+    m_br = re.search(r"(\d{2}/\d{2}/\d{4})", s)
+    if m_br:
+        return m_br.group(1)
+
+    m_iso = re.search(r"(\d{4}-\d{2}-\d{2})", s)
+    if m_iso:
+        try:
+            return datetime.strptime(m_iso.group(1), "%Y-%m-%d").strftime("%d/%m/%Y")
+        except ValueError:
+            pass
+
+    dig = re.sub(r"\D", "", s)
+    if len(dig) >= 8:
+        base = dig[:8]
+        if base.startswith("20"):
+            try:
+                return datetime.strptime(base, "%Y%m%d").strftime("%d/%m/%Y")
+            except ValueError:
+                pass
+        try:
+            return datetime.strptime(base, "%d%m%Y").strftime("%d/%m/%Y")
+        except ValueError:
+            pass
+
+    return None
+
+
+def tratar_tarefa_aberta(identificador: str) -> tuple[CamposNBS, dict]:
     """
     Obtém informações da tarefa e processo do Holmes.
     Campos Holmes reais: Protocolo, Filial, CPF, Tipo de pagamento, Valores,
@@ -144,20 +199,26 @@ def tratar_tarefa_aberta(identificador: str) -> tuple[list, dict]:
             return v or _extrair_valor(propriedades_tarefa, nome)
 
         # Validar ações
+        # Em alguns fluxos/etapas o Holmes expõe "Aprovar" ou "Avançar"
+        # como ação de sucesso, mesmo quando o nome configurado é diferente.
         acaoSucessoID = acaoErroID = None
         for acao in acoes:
-            nome, _id = acao.get("name"), acao.get("id")
-            if nome == NOME_ACAO_SUCESSO:
+            nome, _id = str(acao.get("name") or ""), acao.get("id")
+            nome_norm = bot.util.normalizar(nome)
+            sucesso_norm = bot.util.normalizar(str(NOME_ACAO_SUCESSO or ""))
+            erro_norm = bot.util.normalizar(str(NOME_ACAO_ERRO or ""))
+
+            if nome_norm in {sucesso_norm, "aprovar", "avancar"}:
                 acaoSucessoID = _id
-            elif nome == NOME_ACAO_ERRO:
+            elif nome_norm in {erro_norm, "pendenciar"}:
                 acaoErroID = _id
         assert None not in (acaoSucessoID, acaoErroID), (
             f"A tarefa ({identificador}) não possui ações esperadas: "
             f"[{NOME_ACAO_SUCESSO}, {NOME_ACAO_ERRO}]"
         )
 
-        # Campos conforme Holmes real
-        cpf = _get("cpf")
+        # Campos conforme Holmes real (CPF ou CNPJ para Pessoa Jurídica)
+        cpf = _get("cpf") or _get("cnpj")
         if cpf:
             cpf = re.sub(r"\D", "", cpf)
         if not cpf:
@@ -197,49 +258,43 @@ def tratar_tarefa_aberta(identificador: str) -> tuple[list, dict]:
         if not cod_empresa and not cod_filial:
             if filial_nome and "-" in str(filial_nome):
                 cod_filial = filial_nome.split("-")[0].strip()
-            if not cod_filial:
-                cod_filial = "481"
         if not cod_empresa:
-            cod_empresa = "1"
+            campos_invalidos.append("Código Empresa NBS")
+        if not cod_filial:
+            campos_invalidos.append("Código Filial NBS")
 
         # Doc: Número NF = campo Processo Holmes
         processo_num = _get("processo") or _get("ait") or protocolo or ""
         if processo_num:
             processo_num = processo_num.replace("-", "").replace(".", "").replace(" ", "")
 
-        iniciar_em = _get("iniciar em")
+        iniciar_em = _normalizar_data_holmes(_get("iniciar em"))
         if not iniciar_em:
-            iniciar_em = datetime.now().strftime("%Y-%m-%d")
+            iniciar_em = datetime.now().strftime("%d/%m/%Y")
 
         centro_custo = _get("centro de custo") or _extrair_nested_centro_custo(propriedades_processo)
         if not centro_custo:
             centro_custo = "0"
 
-        data_vencimento_raw = _get("data de vencimento")
-        data_vencimento = None
-        if data_vencimento_raw:
-            try:
-                dt = datetime.fromisoformat(data_vencimento_raw.replace("Z", "+00:00"))
-                data_vencimento = dt.strftime("%d/%m/%Y")
-            except (ValueError, TypeError):
-                data_vencimento = datetime.now().strftime("%d/%m/%Y")
+        data_vencimento_raw = _get("data de vencimento") or _get("data de pagamento")
+        data_vencimento = _normalizar_data_holmes(data_vencimento_raw)
         if not data_vencimento:
-            data_vencimento = datetime.now().strftime("%d/%m/%Y")
+            campos_invalidos.append("Data de Vencimento")
 
         assert not campos_invalidos, f"Campos obrigatórios ausentes: {campos_invalidos}"
 
-        campos_obrigatorios = [
-            cpf,
-            cod_empresa,
-            cod_filial,
-            processo_num,
-            iniciar_em,
-            despesa_pagamento,
-            protocolo,
-            centro_custo,
-            data_vencimento,
-            tipo_pagamento,
-        ]
+        campos = CamposNBS(
+            cpf=cpf,
+            cod_empresa=cod_empresa,
+            cod_filial=cod_filial,
+            processo=processo_num,
+            iniciar_em=iniciar_em,
+            despesa_pagamento=despesa_pagamento,
+            protocolo=protocolo,
+            centro_custo=centro_custo,
+            data_vencimento=data_vencimento,
+            tipo_pagamento=tipo_pagamento,
+        )
 
         dados_extraidos = DadosExtraidosHolmes(
             Empresa_holmes=cod_empresa,
@@ -259,7 +314,7 @@ def tratar_tarefa_aberta(identificador: str) -> tuple[list, dict]:
             f"Dados extraídos: protocolo={protocolo}, tipo={tipo_pagamento}, valor={despesa_pagamento}"
         )
 
-        return (campos_obrigatorios, {"propriedades_processo": propriedades_processo, "dados_extraidos": dados_extraidos})
+        return (campos, {"propriedades_processo": propriedades_processo, "dados_extraidos": dados_extraidos})
 
     except AssertionError as e:
         raise ErroNegocio(str(e))
