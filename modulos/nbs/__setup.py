@@ -19,6 +19,233 @@ from datetime import datetime, timedelta
 #externo
 import pandas as pd
 
+
+def _sleep_seguro(segundos: float) -> None:
+    """Evita abortar o fluxo por KeyboardInterrupt espúrio durante waits técnicos."""
+    try:
+        sleep(segundos)
+    except KeyboardInterrupt:
+        bot.logger.informar(
+            "KeyboardInterrupt detectado durante espera técnica; continuando inicialização do NBS"
+        )
+
+
+def _startfile_seguro(caminho: str, tentativas: int = 2) -> bool:
+    """Executa os.startfile com retry para tolerar KeyboardInterrupt espúrio na VM."""
+    total = max(1, int(tentativas))
+    for tentativa in range(1, total + 1):
+        try:
+            os.startfile(caminho)
+            return True
+        except KeyboardInterrupt:
+            bot.logger.informar(
+                f"KeyboardInterrupt detectado ao abrir NBS (tentativa {tentativa}/{total}); tentando novamente"
+            )
+            _sleep_seguro(0.8)
+        except Exception as e:
+            bot.logger.informar(
+                f"Falha ao abrir NBS na tentativa {tentativa}/{total}: {e}"
+            )
+            if tentativa >= total:
+                raise
+            _sleep_seguro(0.8)
+    return False
+
+
+def _tratar_popup_open_file_security_warning(timeout: int = 8) -> bool:
+    """Trata popup 'Open File - Security Warning' clicando no botão Open/Abrir quando existir."""
+    try:
+        from pywinauto import Desktop
+    except Exception:
+        return False
+
+    total = max(1, int(timeout * 5))
+    for _ in range(total):
+        try:
+            for w in Desktop(backend="win32").windows():
+                try:
+                    titulo = (w.window_text() or "").strip().lower()
+                    if not titulo:
+                        continue
+                    if "open file - security warning" not in titulo and "aviso de segur" not in titulo:
+                        continue
+
+                    try:
+                        w.set_focus()
+                        sleep(0.1)
+                    except Exception:
+                        pass
+
+                    for cls_btn in ("Button", "TButton", "TBitBtn"):
+                        for btn in w.descendants(class_name=cls_btn):
+                            try:
+                                txt = (btn.window_text() or "").strip().lower()
+                                if txt in ("open", "abrir", "&open", "&abrir"):
+                                    btn.click_input()
+                                    bot.logger.informar("Popup de segurança tratado: clique em Open/Abrir")
+                                    sleep(0.5)
+                                    return True
+                            except Exception:
+                                continue
+
+                    # Fallback teclado: Alt+O é o padrão do botão Open
+                    try:
+                        w.type_keys("%o")
+                        sleep(0.4)
+                        return True
+                    except Exception:
+                        pass
+                    try:
+                        w.type_keys("{ENTER}")
+                        sleep(0.4)
+                        return True
+                    except Exception:
+                        pass
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        sleep(0.2)
+
+    return False
+
+
+def _obter_janela_login_nbs():
+    """Obtém a janela de login do NBS Fiscal contendo rótulos de Usuário/Senha/Servidor."""
+    try:
+        from pywinauto import Desktop
+    except Exception:
+        return None
+
+    for w in Desktop(backend="win32").windows():
+        try:
+            titulo = (w.window_text() or "").strip().lower()
+            if "nbs" not in titulo:
+                continue
+            if "fiscal" not in titulo and "login" not in titulo and "nbs_fiscal" not in titulo:
+                continue
+
+            textos = []
+            for cls_lbl in ("TLabel", "Static"):
+                for lbl in w.descendants(class_name=cls_lbl):
+                    try:
+                        txt = (lbl.window_text() or "").strip().lower()
+                        if txt:
+                            textos.append(txt)
+                    except Exception:
+                        continue
+            blob = " | ".join(textos)
+            if any(k in blob for k in ("usuário", "usuario", "senha", "servidor")):
+                return w
+        except Exception:
+            continue
+
+    return None
+
+
+def _preencher_controle_texto(controle, valor: str) -> bool:
+    """Preenche um controle de texto VCL de forma robusta."""
+    try:
+        controle.click_input()
+        sleep(0.08)
+        try:
+            controle.type_keys("^a{BACKSPACE}" + str(valor), with_spaces=True)
+        except Exception:
+            controle.type_keys("^a" + str(valor), with_spaces=True)
+        sleep(0.1)
+        return True
+    except Exception:
+        return False
+
+
+def _preencher_login_nbs_por_labels(usuario: str, senha: str, servidor: str) -> bool:
+    """Preenche login do NBS mapeando rótulos para campos (Usuário, Senha, Servidor)."""
+    janela = _obter_janela_login_nbs()
+    if janela is None:
+        return False
+
+    try:
+        janela.set_focus()
+        sleep(0.15)
+    except Exception:
+        pass
+
+    labels = []
+    for cls_lbl in ("TLabel", "Static"):
+        for lbl in janela.descendants(class_name=cls_lbl):
+            try:
+                txt = (lbl.window_text() or "").strip().lower()
+                if txt:
+                    r = lbl.rectangle()
+                    labels.append((txt, r, lbl))
+            except Exception:
+                continue
+
+    campos = []
+    for cls_in in ("TEdit", "TMaskEdit", "TOvcPictureField", "TOvcDbPictureField"):
+        for ctrl in janela.descendants(class_name=cls_in):
+            try:
+                if hasattr(ctrl, "is_visible") and not ctrl.is_visible():
+                    continue
+                r = ctrl.rectangle()
+                campos.append((r.top, r.left, r, ctrl))
+            except Exception:
+                continue
+    campos.sort(key=lambda x: (x[0], x[1]))
+    if not campos:
+        return False
+
+    def _achar_campo_por_label(*keywords: str):
+        alvo_label = None
+        for txt, rr, _ in labels:
+            if any(k in txt for k in keywords):
+                alvo_label = rr
+                break
+        if alvo_label is None:
+            return None
+
+        cands = [
+            (abs(cr.top - alvo_label.top), cr.left, c)
+            for _, _, cr, c in campos
+            if cr.left >= alvo_label.left and abs(cr.top - alvo_label.top) <= 28
+        ]
+        if not cands:
+            cands = [
+                (abs(cr.top - alvo_label.top), cr.left, c)
+                for _, _, cr, c in campos
+                if cr.left >= alvo_label.left
+            ]
+        if not cands:
+            return None
+        cands.sort(key=lambda x: (x[0], x[1]))
+        return cands[0][2]
+
+    campo_usuario = _achar_campo_por_label("usuário", "usuario")
+    campo_senha = _achar_campo_por_label("senha")
+    campo_servidor = _achar_campo_por_label("servidor")
+
+    if campo_usuario and campo_senha and campo_servidor:
+        ok_u = _preencher_controle_texto(campo_usuario, usuario)
+        ok_s = _preencher_controle_texto(campo_senha, senha)
+        ok_sv = _preencher_controle_texto(campo_servidor, servidor)
+        if ok_u and ok_s and ok_sv:
+            bot.logger.informar("Login NBS preenchido por labels (Usuário/Senha/Servidor)")
+            return True
+
+    # Fallback final: começar no topo e preencher por Tab
+    try:
+        campos[0][3].click_input()
+        sleep(0.1)
+        bot.teclado.digitar_teclado(str(usuario), .05)
+        bot.teclado.apertar_tecla("tab")
+        bot.teclado.digitar_teclado(str(senha), .05)
+        bot.teclado.apertar_tecla("tab")
+        bot.teclado.digitar_teclado(str(servidor), .05)
+        bot.logger.informar("Login NBS preenchido via fallback por Tab")
+        return True
+    except Exception:
+        return False
+
 class ErroNBS (Exception):
     """Erro próprio para o sistema NBS"""
     def __init__ (self, mensagem: str) -> None:
@@ -32,13 +259,18 @@ class RetornoStatus(NamedTuple):
     SUCESSO: bool
     MENSAGEM: str = ""
 
+# Exporta apenas os símbolos necessários para este processo.
+# processar_entrada, valida_credito_ctb e consultar_de_para_empresa são
+# funções legadas de outros processos NBS e não devem ser usadas aqui.
+__all__ = ["ErroNBS", "RetornoStatus", "Sistema"]
+
 class Sistema:
     """Sistema NBS"""
 
     _atexit_encerrar_sistema = False
     """Estado atual do registro da função no `atexit` que encerra o sistema ao fim da execução"""
 
-    def __init__(self, usuario, senha, servidor) -> Self:
+    def __init__(self, usuario, senha, servidor) -> None:
         """Cria uma instância do sistema NBS"""
         self.usuario = usuario
         self.senha = senha
@@ -64,24 +296,139 @@ class Sistema:
 
             # Executa o sistema
             bot.logger.informar('Executando NBS...')
-            os.startfile( self.caminho_sistema )
+            abriu = _startfile_seguro(self.caminho_sistema, tentativas=2)
+            if not abriu:
+                raise Exception("Não foi possível iniciar o NBS via os.startfile")
+            _sleep_seguro(2)
 
-            # Aguarda um tempo para sistema carregar
-            sistema_abriu = bot.util.aguardar_condicao(lambda: self.titulo_sistema
-                                              in bot.windows.Janela.titulos_janelas(), 30)
+            # Pop-up ao clicar no atalho (Open File - Security Warning) - clicar em Open/Abrir
+            _tratar_popup_open_file_security_warning(timeout=8)
+
+            # Aguarda janela NBS - tela de login (Usuário, Senha, Servidor)
+            # Títulos possíveis: "NBS_FISCAL", "NBS - Login", "NBS Sistema Fiscal"
+            titulos_aceitos = [t.strip() for t in str(self.titulo_sistema or "").split("|") if t.strip()] or ["NBS"]
+            JANELAS_LOGIN = ("NBS_FISCAL", "NBS - Login", "NBS Sistema Fiscal")
+
+            def _eh_janela_nbs(titulo):
+                s = str(titulo or "").strip()
+                if not s or len(s) < 4:
+                    return False
+                if "Search Results" in s or " in NBS" in s:
+                    return False
+                if any(j in s for j in JANELAS_LOGIN):
+                    return True
+                if any(a in s for a in titulos_aceitos):
+                    return True
+                if "NBS" in s.upper() and ("Fiscal" in s or "Financeiro" in s or "Login" in s or "NBS_" in s or "Nota Fiscal" in s):
+                    return True
+                return False
+
+            def _obter_titulo_nbs():
+                titulos = bot.windows.Janela.titulos_janelas()
+                lista = list(titulos) if isinstance(titulos, (list, tuple, set)) else ([titulos] if titulos else [])
+                for item in lista:
+                    if item:
+                        si = str(item)
+                        if "NBS_FISCAL" in si or "NBS - Login" in si:
+                            return si
+                for item in lista:
+                    if item and _eh_janela_nbs(item):
+                        return str(item)
+                return None
+
+            def _janela_nbs_visivel():
+                titulos = bot.windows.Janela.titulos_janelas()
+                titulos_str = str(titulos)
+                if "NBS_FISCAL" in titulos_str or "NBS - Login" in titulos_str:
+                    return True
+                lista = list(titulos) if isinstance(titulos, (list, tuple, set)) else ([titulos] if titulos else [])
+                for t in lista:
+                    if t and _eh_janela_nbs(t):
+                        return True
+                return False
+            sistema_abriu = bot.util.aguardar_condicao(_janela_nbs_visivel, 60)
             if not sistema_abriu:
-                raise Exception("Janela do sistema não abriu no tempo esperado")
-            
-            # Foca na janela do sistema
-            janela = bot.estruturas.Janela( self.titulo_sistema ).focar()
+                raise Exception(
+                    f"Janela do sistema não abriu no tempo esperado. "
+                    f"Esperado: {titulos_aceitos}. Janelas: {bot.windows.Janela.titulos_janelas()}"
+                )
+            titulo_real = _obter_titulo_nbs() or self.titulo_sistema
+            # Garantir string (a biblioteca bot pode falhar se receber list/tuple)
+            if isinstance(titulo_real, (list, tuple)):
+                titulo_real = next((str(x) for x in titulo_real if x and "NBS" in str(x)), self.titulo_sistema)
+            titulo_real = str(titulo_real).strip() or self.titulo_sistema
 
-            # Faz login com as credenciais
-            bot.teclado.digitar_teclado(self.usuario, .05)
-            bot.teclado.apertar_tecla('tab')
-            bot.teclado.digitar_teclado(self.senha, .05); sleep(1)
-            bot.teclado.apertar_tecla('tab')
-            bot.teclado.digitar_teclado(self.servidor, .05); sleep(1)
-            bot.teclado.apertar_tecla('enter')
+            janela_bot = None
+            janela_pywinauto = None
+            try:
+                janela_bot = bot.windows.Janela(titulo_real)
+                janela_bot.focar()
+            except (AssertionError, Exception) as e:
+                # Fallback: focar por pywinauto (bot.Janela pode exigir match exato)
+                bot.logger.informar(f"Fallback pywinauto para janela NBS: {e}")
+                from pywinauto import Desktop
+                for w in Desktop(backend="win32").windows():
+                    try:
+                        t = w.window_text() or ""
+                        if "NBS_FISCAL" in t or "NBS - Login" in t or ("NBS" in t and "Fiscal" in t):
+                            w.set_focus()
+                            janela_pywinauto = w
+                            break
+                    except Exception:
+                        continue
+            sleep(1)
+            preencheu_login = _preencher_login_nbs_por_labels(
+                self.usuario,
+                self.senha,
+                self.servidor,
+            )
+            if not preencheu_login:
+                bot.logger.informar("Preenchimento por labels indisponível; usando fallback simples de teclado")
+                bot.teclado.digitar_teclado(self.usuario, .05)
+                bot.teclado.apertar_tecla('tab')
+                bot.teclado.digitar_teclado(self.senha, .05)
+                bot.teclado.apertar_tecla('tab')
+                bot.teclado.digitar_teclado(self.servidor, .05)
+            sleep(0.5)
+            # Clicar Confirmar (Enter pode não funcionar em alguns formulários)
+            try:
+                if janela_bot:
+                    for btn in janela_bot.elementos(class_name="TBitBtn", top_level_only=False):
+                        if "confirmar" in str(btn.window_text() or "").lower():
+                            bot.mouse.clicar_mouse(coordenada=Elemento(btn).coordenada)
+                            break
+                    else:
+                        bot.teclado.apertar_tecla('enter')
+                elif janela_pywinauto:
+                    def _clicar_confirmar(parent):
+                        for c in parent.children():
+                            try:
+                                txt = (c.window_text() or "").lower()
+                                if "confirmar" in txt:
+                                    c.click_input()
+                                    return True
+                                if _clicar_confirmar(c):
+                                    return True
+                            except Exception:
+                                pass
+                        return False
+                    if not _clicar_confirmar(janela_pywinauto):
+                        bot.teclado.apertar_tecla('enter')
+                else:
+                    bot.teclado.apertar_tecla('enter')
+            except Exception:
+                bot.teclado.apertar_tecla('enter')
+            sleep(2)
+            # Pop-up "Informação" (versão desatualizada) - clicar OK
+            if bot.util.aguardar_condicao(lambda: "Informação" in str(bot.windows.Janela.titulos_janelas()), 3):
+                titulos_info = bot.windows.Janela.titulos_janelas()
+                lista_info = list(titulos_info) if isinstance(titulos_info, (list, tuple, set)) else ([titulos_info] if titulos_info else [])
+                for t in lista_info:
+                    if isinstance(t, str) and "Informação" in t:
+                        bot.windows.Janela(t).focar()
+                        bot.teclado.apertar_tecla('enter')
+                        sleep(1)
+                        break
 
         except Exception as erro:
             raise ErroNBS(f"Erro ao inicializar o NBS: { erro }")
@@ -100,6 +447,10 @@ class Sistema:
                 Stop-Process -Force
         """
         subprocess.run(["powershell", "-Command", comando], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+# --- FUNÇÕES LEGADAS (outros processos NBS) ---
+# Não exportadas via __all__. Não usar neste processo.
+# Remover em refatoração futura quando os outros processos forem migrados.
 
 def valida_credito_ctb(torre: str, conta_contabil: str) -> tuple[str, str] | None:
     """Verifica se `conta_contabil` está presente na relação de contas que creditam PIS/COFINS
@@ -1067,7 +1418,7 @@ def comparar_data():
 def adicionar_dia_util(data:datetime) -> datetime:
     """Função para adicionar um dia útil para o vencimento"""
     ano_atual = data.year
-    feriados_brasil = holidays.Brazil(years=ano_atual)
+    feriados_brasil = holidays.country_holidays("BR", years=ano_atual)
 
     while True:
         data+= timedelta(days=1)
@@ -1076,23 +1427,11 @@ def adicionar_dia_util(data:datetime) -> datetime:
         if data.year != ano_atual:
             ano_atual = data.year
             #Atualiza a lista de feriados para o novo ano
-            feriados_brasil = holidays.Brazil(years=ano_atual)
+            feriados_brasil = holidays.country_holidays("BR", years=ano_atual)
 
         #Verifica se é dia util (segunda a sexta) e não é feriado
         if data.weekday() < 5 and data not in feriados_brasil:
             break
     return data
 
-__all__ = [
-    # "iniciar_sistema",
-    "ErroNBS",
-    "Sistema",
-    "processar_entrada",
-    "produtos_xml",
-    "consultar_de_para_empresa",
-    "de_para_cfop",
-    "de_para_historico_padrao",
-    # "encerrar_sistema",
-    "comparar_data",
-    "valores_xml"
-]
+# __all__ original removido: o único __all__ válido está no topo do arquivo.
