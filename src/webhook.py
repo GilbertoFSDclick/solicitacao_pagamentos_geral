@@ -59,7 +59,7 @@ class ProcessoWebhook(webhook.ProcessoWebhook[Properties]):
             f"Ações esperadas: [{NOME_ACAO_SUCESSO}, {NOME_ACAO_ERRO}]"
         )
 
-        return webhook.holmes.AcaoHolmes(acaoSucessoID, acaoErroID)
+        return webhook.holmes.AcaoHolmes(acaoSucessoID or "", acaoErroID or "")
 
     def encaminhar_tarefa_sucesso(self) -> typing.Self:
         try:
@@ -86,22 +86,37 @@ class ProcessoWebhook(webhook.ProcessoWebhook[Properties]):
         return self
 
     def aplicar_retry(self, etapa: str, motivo: str) -> typing.Self:
-        """Aplica política de retry (TE04, TE08)."""
+        """Aplica política de retry (TE04, TE08).
+        Quando o máximo de tentativas é atingido: pendencia a tarefa no Holmes
+        e aloca para o usuário manual ('Lançamento Manual RPA falhou')."""
         try:
             if self.webhook.tentativas >= MAX_TENTATIVAS_WEBHOOK:
                 bot.logger.informar(
                     f"Política de retry aplicada ({MAX_TENTATIVAS_WEBHOOK} tentativas de processamento)"
                 )
-                self.encaminhar_tarefa_erro(
+                motivo_pendencia = (
                     f"[Política de retry] - Pendência após {MAX_TENTATIVAS_WEBHOOK} tentativas. "
                     f"|| Etapa: {etapa} || Motivo: {motivo}"
                 )
+                self.encaminhar_tarefa_erro(motivo_pendencia)
+                # TE04/TE05: alocar para responsável manual
+                try:
+                    id_tarefa = webhook.holmes.obter_tarefa_aberta(self.webhook.id_processo)
+                    webhook.holmes.alocar_tarefa_manual(id_tarefa, "Lançamento Manual RPA falhou")
+                except Exception as e_aloc:
+                    bot.logger.informar(f"Falha ao alocar tarefa para manual: {e_aloc}")
                 return self
 
             self.incrementar_tentativas_webhook()
         except Exception as erro:
-            bot.logger.informar(erro)
+            bot.logger.informar(str(erro))
         return self
+
+    @property
+    def retry_esgotado(self) -> bool:
+        """True quando o número de tentativas atingiu ou superou o máximo.
+        Usar após aplicar_retry() para decidir se deve notificar por e-mail."""
+        return self.webhook.tentativas >= MAX_TENTATIVAS_WEBHOOK
 
 
 filtros: dict[str, typing.Any] = {
